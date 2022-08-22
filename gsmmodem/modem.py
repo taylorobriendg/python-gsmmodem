@@ -8,8 +8,9 @@ from time import sleep
 
 from .serial_comms import SerialComms
 from .exceptions import CommandError, InvalidStateException, CmeError, CmsError, InterruptedException, TimeoutException, PinRequiredError, IncorrectPinError, SmscNumberUnknownError
-from .pdu import encodeSmsSubmitPdu, decodeSmsPdu, encodeGsm7, encodeTextMode
+from .pdu import encodeSmsSubmitPdu, decodeSmsPdu, encodeGsm7, encodeTextMode, packSeptets
 from .util import SimpleOffsetTzInfo, lineStartingWith, allLinesMatchingPattern, parseTextModeTimeStr, removeAtPrefix
+from .dcs import decodeWithDcs
 
 #from . import compat # For Python 2.6 compatibility
 from gsmmodem.util import lineMatching
@@ -174,6 +175,7 @@ class GsmModem(SerialComms):
         self._pollCallStatusRegex = None # Regular expression used when polling outgoing call status
         self._writeWait = 0 # Time (in seconds to wait after writing a command (adjusted when 515 errors are detected)
         self._smsTextMode = False # Storage variable for the smsTextMode property
+        self._ussdTextMode = False # Storage variable for the ussdTextMode property
         self._gsmBusy = 0 # Storage variable for the GSMBUSY property
         self._smscNumber = None # Default SMSC number
         self._smsRef = 0 # Sent SMS reference counter
@@ -248,8 +250,8 @@ class GsmModem(SerialComms):
                 # Huawei modems use ^DTMF to send DTMF tones
                 callUpdateTableHint = 1 # Huawei
             if '^USSDMODE' in commands:
-                # Enable Huawei text-mode USSD
-                self.write('AT^USSDMODE=0', parseError=False)
+                # Disable Huawei text-mode USSD.  It doesn't work with unicode responses.
+                self.write('AT^USSDMODE=1', parseError=False)
             if '+WIND' in commands:
                 callUpdateTableHint = 2 # Wavecom
                 enableWind = True
@@ -604,6 +606,19 @@ class GsmModem(SerialComms):
                 self.write('AT+CMGF={0}'.format(1 if textMode else 0))
             self._smsTextMode = textMode
             self._compileSmsRegexes()
+
+    @property
+    def ussdTextMode(self):
+        """ :return: True if the modem is set to use text mode for USSD, False if it is set to use PDU mode """
+        return self._ussdTextMode
+    @ussdTextMode.setter
+    def ussdTextMode(self, textMode):
+        """ Set to True for the modem to use text mode for USSD, or False for it to use PDU mode """
+        if textMode != self._ussdTextMode and '^USSDMODE' in self.supportedCommands:
+            if self.alive:
+                self.write('AT^USSDMODE={0}'.format(0 if textMode else 1))
+                self.write('AT+CSCS="{0}"'.format('IRA' if textMode else 'UCS2'))
+            self._ussdTextMode = textMode
 
     @property
     def smsSupportedEncoding(self):
@@ -965,6 +980,8 @@ class GsmModem(SerialComms):
         :rtype: gsmmodem.modem.Ussd
         """
         self._ussdSessionEvent = threading.Event()
+        if not self.ussdTextMode:
+            ussdString = packSeptets(encodeGsm7(ussdString)).hex().upper()
         try:
             cusdResponse = self.write('AT+CUSD=1,"{0}",15'.format(ussdString), timeout=responseTimeout) # Should respond with "OK"
         except Exception:
@@ -1532,18 +1549,27 @@ class GsmModem(SerialComms):
             self.log.debug('Multiple +CUSD responses received; filtering...')
             # Some modems issue a non-standard "extra" +CUSD notification for releasing the session
             for cusdMatch in cusdMatches:
+                if self.ussdTextMode:
+                    m = cusdMatch.group(2)
+                else:
+                    m = decodeWithDcs(cusdMatch.group(2), int(cusdMatch.group(3)), self.log)
                 if cusdMatch.group(1) == '2':
                     # Set the session to inactive, but ignore the message
-                    self.log.debug('Ignoring "session release" message: %s', cusdMatch.group(2))
+                    self.log.debug('Ignoring "session release" message: %s', m)
                     sessionActive = False
                 else:
                     # Not a "session release" message
-                    message = cusdMatch.group(2)
+                    message = m
                     if sessionActive and cusdMatch.group(1) != '1':
                         sessionActive = False
         else:
             sessionActive = cusdMatches[0].group(1) == '1'
-            message = cusdMatches[0].group(2)
+            if self.ussdTextMode:
+                message = cusdMatches[0].group(2)
+            else:
+                message = decodeWithDcs(cusdMatches[0].group(2),
+                                        int(cusdMatches[0].group(3)),
+                                        self.log)
         return Ussd(self, sessionActive, message)
 
     def _placeHolderCallback(self, *args):

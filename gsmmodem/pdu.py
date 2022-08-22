@@ -1,4 +1,4 @@
-# -*- coding: utf8 -*-
+# -*- coding: utf-8 -*-
 
 """ SMS PDU encoding methods """
 
@@ -906,8 +906,8 @@ def decodeUcs2(byteIter, numBytes):
     """ Decodes UCS2-encoded text from the specified byte iterator, up to a maximum of numBytes """
     userData = bytearray()
     try:
-        for b in byteIter:
-            userData.append(b)
+        for i in range(numBytes):
+            userData.append(next(byteIter))
     except StopIteration:
         # Not enough bytes in iterator to reach numBytes; return what we have
         pass
