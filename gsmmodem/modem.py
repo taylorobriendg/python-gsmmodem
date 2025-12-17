@@ -257,6 +257,8 @@ class GsmModem(SerialComms):
                 enableWind = True
             elif '+ZPAS' in commands:
                 callUpdateTableHint = 3 # ZTE
+            if '+SIMCOMATI' in commands:
+                callUpdateTableHint = 4 # SIMCom
         else:
             # Try to enable general notifications on Wavecom-like device
             enableWind = True
@@ -325,6 +327,38 @@ class GsmModem(SerialComms):
             self._waitForCallInitUpdate = False # ZTE modems do not provide "call initiated" updates
             if commands == None: # ZTE uses standard +VTS for DTMF
                 Call.dtmfSupport = True
+        elif callUpdateTableHint == 4: # SIMCom (Tested on SIM7600)
+            self.log.info('Loading SIMCOM call state update table')
+            self._mustPollCallStatus = False
+            Call.dtmfSupport = True
+            try:
+                # Enables automatic reporting of the list of current calls
+                # when the call status changes
+                self.write('AT+CLCC=1')
+            except CommandError:
+                # Modem does not support automatic reporting of the list of
+                # current calls when the call status changes
+                self.log.info('Will use polling for call state updates')
+                self._mustPollCallStatus = True
+
+            # This works well with the SIM7600G for example
+            if not self._mustPollCallStatus:
+                # Using the field <stat> of the AT+CLCC command. Notice the
+                # numbers between groups 1 and 2 on the following regexes
+                #
+                # The possible values are:
+                #   0 – active
+                #   1 – held
+                #   2 – dialing (MO call)
+                #   3 – alerting (MO call)
+                #   4 – incoming (MT call)
+                #   5 – waiting (MT call)
+                #   6 – disconnect
+                self._callStatusUpdates = (
+                    (re.compile('^\+CLCC:\s+\d+,\d,0,\d,[^,],"([^,]*)",\d+$'), self._handleCallAnswered),
+                    (re.compile('^\+CLCC:\s+\d+,\d,2,\d,[^,],"([^,]*)",\d+$'), self._handleCallInitiated),
+                    (re.compile('^\+CLCC:\s+\d+,\d,6,\d,[^,],"([^,]*)",\d+$'), self._handleCallEnded),
+                    (re.compile('^BUSY$'), self._handleCallRejected))
         else:
             # Unknown modem - we do not know what its call updates look like. Use polling instead
             self.log.info('Unknown/generic modem type - will use polling for call state updates')
@@ -569,7 +603,7 @@ class GsmModem(SerialComms):
         except (TimeoutException, CommandError):
             # Try interactive command recognition
             commands = []
-            checkable_commands = ['^CVOICE', '+VTS', '^DTMF', '^USSDMODE', '+WIND', '+ZPAS', '+CSCS', '+CNUM']
+            checkable_commands = ['^CVOICE', '+VTS', '^DTMF', '^USSDMODE', '+WIND', '+ZPAS', '+CSCS', '+CNUM', '+SIMCOMATI']
 
             # Check if modem is still alive
             try:
